@@ -33,6 +33,7 @@ from ResMap_toChimera import *
 from ResMap_spectrumTools import *
 from ResMap_sphericalProfile import sphericalAverage
 
+
 def ResMap_algorithm(**kwargs):
 	'''
 	ResMap_algorithm
@@ -108,6 +109,8 @@ def ResMap_algorithm(**kwargs):
 	graphicalOutput  = bool(kwargs.get('graphicalOutput', False))
 	chimeraLaunch    = bool(kwargs.get('chimeraLaunch', False))
 	noiseDiagnostics = bool(kwargs.get('noiseDiagnostics', False))
+	
+	scipionPrewhitenParams = kwargs.get('scipionPrewhitenParams', {})
 
 	# Check for voxel size (really shouldn't ever happen)
 	if vxSize == 0.0:
@@ -120,105 +123,59 @@ def ResMap_algorithm(**kwargs):
 	if inputFileName:
 		data  = dataMRC.matrix
 		data  = data-np.mean(data)
+		dataOrig = np.copy(data)
+		orig_n = data.shape[0]
 	elif inputFileName1 and inputFileName2:
-
 		splitVolume = True
 		data     = 0.5 * (dataMRC1.matrix + dataMRC2.matrix)
 		dataDiff = 0.5 * (dataMRC1.matrix - dataMRC2.matrix)
-
+		dataOrig = np.copy(data)
+		orig_n = data.shape[0]
 	else:
 		print "There is a serious problem with loading files. Aborting."
 		exit(1)
 
-	# Grab the volume size (assumed to be a cube)
-	n = data.shape[0]
-
 	m, s = divmod(time() - tStart, 60)
 	print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
 
-	print '\n\n= Testing Whether the Input Volume has been Low-pass Filtered\n'
-	tStart = time()
 
-	# If the volume is larger than subVolLPF^3, then do LPF test on smaller volume to save computation
+	#################################
+	#
+	#   Test if volume is LPF
+	#
+	#################################
 	subVolLPF = 160
-	if n > subVolLPF:
-
-		print ( "=======================================================================\n"
-				"|                                                                     |\n"
-				"|          The input volume is quite large ( >160 voxels).            |\n"
-				"|                                                                     |\n"
-				"|         ResMap will run its low-pass filtering test on a            |\n"
-				"|       cube of size 160 taken from the center of the volume.         |\n"
-				"|                                                                     |\n"
-				"|        This is usually not a problem, but please notify the         |\n"
-				"|                  authors if something goes awry.                    |\n"
-				"|                                                                     |\n"
-				"=======================================================================\n")
-
-		mid  = int(n/2)
-		midR = subVolLPF/2
-
-		# Extract a cube from the middle of the density
-		middleCube = data[mid-midR:mid+midR, mid-midR:mid+midR, mid-midR:mid+midR]
-
-		# Create a 3D hamming window
-		hammingWindow1D = signal.hamming(subVolLPF)
-		hammingWindow2D = array_outer_product(hammingWindow1D,hammingWindow1D)
-		hammingWindow3D = array_outer_product(hammingWindow2D,hammingWindow2D)
-		del hammingWindow1D, hammingWindow2D
-
-		# Apply the hamming window to the middle cube
-		middleCube = np.multiply(middleCube,hammingWindow3D)
-
-		# Calculate the Fourier spectrum and run the test
-		(dataF, dataPowerSpectrum) = calculatePowerSpectrum(middleCube)
-		LPFtest                    = isPowerSpectrumLPF(dataPowerSpectrum)
-		del middleCube, hammingWindow3D
+	if splitVolume == False:
+		LPFtestResult = testLPF(
+														data        = data,
+														splitVolume = splitVolume,
+														vxSize      = vxSize,
+														minRes      = minRes,
+														maxRes      = maxRes,
+														subVolLPF   = subVolLPF
+														)
 	else:
-		(dataF, dataPowerSpectrum) = calculatePowerSpectrum(data)
-		LPFtest                    = isPowerSpectrumLPF(dataPowerSpectrum)
+		LPFtestResult = testLPF(
+														data        = data,
+														dataDiff    = dataDiff,
+														splitVolume = splitVolume,
+														vxSize      = vxSize,
+														minRes      = minRes,
+														maxRes      = maxRes,
+														subVolLPF   = subVolLPF
+														)
 
-	if LPFtest['outcome']:
-		print ( "=======================================================================\n"
-				"|                                                                     |\n"
-				"|            The volume appears to be low-pass filtered.              |\n"
-				"|                                                                     |\n"
-				"|         This is not ideal, but ResMap will attempt to run.          |\n"
-				"|                                                                     |\n"
-				"|        The input volume will be down-sampled within ResMap.         |\n"
-				"|                                                                     |\n"
-				"=======================================================================\n")
+	LPFfactor         = LPFtestResult['LPFfactor']
+	vxSize            = LPFtestResult['vxSize']
+	minRes            = LPFtestResult['minRes']
+	maxRes            = LPFtestResult['maxRes']
+	currentRes        = LPFtestResult['currentRes']
+	data              = LPFtestResult['data']
+	dataF             = LPFtestResult['dataF']
+	dataPowerSpectrum = LPFtestResult['dataPowerSpectrum']
+	if splitVolume == True:
+		dataDiff = LPFtestResult['dataDiff']
 
-		# Calculate the ratio by which the volume should be down-sampled
-		# such that the LPF cutoff becomes the new Nyquist
-		LPFfactor = round((LPFtest['factor'])/0.01)*0.01	# round to the nearest 0.01
-
-		# Down-sample the volume using cubic splines
-		data   = ndimage.interpolation.zoom(data, LPFfactor, mode='reflect')
-		if splitVolume == True:
-			dataDiff = ndimage.interpolation.zoom(dataDiff, LPFfactor, mode='reflect')
-		vxSize = float(vxSize)/LPFfactor
-	else:
-		print ( "=======================================================================\n"
-				"|                                                                     |\n"
-				"|        The volume does not appear to be low-pass filtered.          |\n"
-				"|                                                                     |\n"
-				"|                              Great!                                 |\n"
-				"|                                                                     |\n"
-				"=======================================================================\n")
-		LPFfactor = 0.0
-
-	# Calculate min res
-	if minRes <= (2.2*vxSize):
-		minRes = round((2.2*vxSize)/0.1)*0.1 # round to the nearest 0.1
-	currentRes = minRes
-
-	# Calculate max res
-	if maxRes == 0.0:
-		maxRes = round((4.0*vxSize)/0.5)*0.5 # round to the nearest 0.5
-
-	m, s = divmod(time() - tStart, 60)
-	print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
 
 	print '\n\n= ResMap will now run with the following parameters'
 	if splitVolume == False:
@@ -233,348 +190,239 @@ def ResMap_algorithm(**kwargs):
 	print '  stepRes:\t%.2f'   		% stepRes
 	print '  LPFfactor:\t%.2f'   	% LPFfactor
 
-	print '\n= Computing Mask Separating Particle from Background'
-	tStart = time()
 
-	# Update n in case downsampling was done above
-	n = data.shape[0]
 
-	# We assume the particle is at the center of the volume
-	# Create spherical mask
-	R = createRmatrix(n)
-	Rinside = R < n/2 - 1
+	#################################
+	#
+	#   Compute Mask
+	#
+	#################################
+	computeMaskResult = computeMask(
+																	data = data,
+																	dataMask = dataMask,
+																	LPFfactor = LPFfactor,
+																	splitVolume = splitVolume
+																	)
 
-	# Check to see if mask volume was provided
-	if isinstance(dataMask,MRC_Data) == False:
-		# Compute mask separating the particle from background
-		dataBlurred  = filters.gaussian_filter(data, float(n)*0.02)	# kernel size 2% of n
-		dataMask     = dataBlurred > np.max(dataBlurred)*5e-2		# threshold at 5% of max value
-		del dataBlurred
-	else:
-		if LPFfactor == 0.0:
-			dataMask = np.array(dataMask.matrix, dtype='bool')
-		else:	# Interpolate the given mask
-			dataMask = ndimage.interpolation.zoom(dataMask.matrix, LPFfactor, mode='reflect')
-			dataMask = filters.gaussian_filter(dataMask, float(n)*0.02)	# kernel size 2% of n
-			dataMask = dataMask > np.max(dataMask)*5e-2					# threshold at 5% of max value
+	mask         = computeMaskResult['mask']
+	dataMask     = computeMaskResult['dataMask']
+	oldSumOfMask = computeMaskResult['oldSumOfMask']
+	Rinside      = computeMaskResult['Rinside']
 
+
+	#################################
+	#
+	#   PRE-WHITENING
+	#
+	#################################
 	if splitVolume == False:
-		mask = np.bitwise_and(dataMask,  R < n/2 - 9)	# backoff 9 voxels from edge (make adaptive later)
+		preWhiteningLoopResult = preWhiteningLoop(
+														data              = data,
+														dataF             = dataF,
+														dataPowerSpectrum = dataPowerSpectrum,
+														vxSize            = vxSize,
+														subVolLPF         = subVolLPF,
+														dataMask          = dataMask,
+														splitVolume       = splitVolume,
+														Rinside           = Rinside,
+														LPFfactor         = LPFfactor,
+														scipionPrewhitenParams = scipionPrewhitenParams
+														)
 	else:
-		tmp_box = np.zeros((n,n,n), dtype='bool')	# make cube that goes to 9 voxels to the edge
-		tmp_box[9:-9,9:-9,9:-9] = True 						# | this is a hack for Liz Kellog's case
-		mask = np.bitwise_and(dataMask, tmp_box)
-		del tmp_box
+		preWhiteningLoopResult = preWhiteningLoop(
+														data              = data,
+														dataF             = dataF,
+														dataPowerSpectrum = dataPowerSpectrum,
+														dataDiff          = dataDiff,
+														vxSize            = vxSize,
+														subVolLPF         = subVolLPF,
+														dataMask          = dataMask,
+														splitVolume       = splitVolume,
+														Rinside           = Rinside,
+														LPFfactor         = LPFfactor,
+														scipionPrewhitenParams = scipionPrewhitenParams
+														)
 
-	oldSumOfMask = np.sum(mask)
+	# The "force-stop" param will serve to launch a wizard to estimate 
+	# the prewhitening params and then launch completely in batch mode 
+	if scipionPrewhitenParams.get('force-stop', False):
+		return preWhiteningLoopResult		
+	
+	data = preWhiteningLoopResult['data']
+	
+	if splitVolume == True:
+		dataDiff = preWhiteningLoopResult['dataDiff']
+		
+	print 'newElbowAngstrom', preWhiteningLoopResult['newElbowAngstrom']
+	print 'newRampWeight', preWhiteningLoopResult['newRampWeight']
 
-	m, s = divmod(time() - tStart, 60)
-	print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
-
-	# PRE-WHITENING
-
-	# We take a first shot at ramping the spectrum up/down beyond 10A
-	oldElbowAngstrom = 0
-	newElbowAngstrom = max(10,2.1*vxSize)
-
-	# Sometimes the ramping is too much, so we allow the user to adjust it
-	oldRampWeight = 0.0
-	newRampWeight = 1.0
-
-	if n > subVolLPF:
-
-		print("\n=======================================================================\n"
-				"|                                                                     |\n"
-				"|                 ResMap Pre-Whitening (beta) Tool                    |\n"
-				"|                                                                     |\n"
-				"|                    The volume is quite large.                       |\n"
-				"|                                                                     |\n"
-				"|          ResMap will run its pre-whitening on the largest           |\n"
-				"|     cube it can fit within the particle and in the background.      |\n"
-				"|                                                                     |\n"
-				"|          In split volume mode, ResMap will only fit a cube          |\n"
-				"|  inside the particle and use the difference map as the background.  |\n"
-				"|                                                                     |\n"
-				"=======================================================================\n")
-
-		print '\n= Computing The Largest Cube Within the Particle'
-		tStart = time()
-
-		dataMaskDistance = ndimage.morphology.distance_transform_cdt(dataMask, metric='taxicab')
-
-		m, s = divmod(time() - tStart, 60)
-		print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
-
-		# Only need to compute largest cube in background if in single volume mode
-		if splitVolume == False:
-			print '\n= Computing The Largest Cube in the Background'
-			tStart = time()
-
-			dataOutside         = np.logical_and(np.logical_not(dataMask),Rinside)
-			dataOutsideDistance = ndimage.morphology.distance_transform_cdt(dataOutside, metric='taxicab')
-
-			m, s = divmod(time() - tStart, 60)
-			print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
-
-		print '\n= Extracting Cubes and Calculating Spherically Averaged Power Spectra'
-		tStart = time()
-
-		# Calculate the largest box size that can be fit
-		if splitVolume == True:
-			# Biggest cube that fits just inside the particle
-			widthBox = np.max(dataMaskDistance)
-		else:
-			# Biggest cube that fits both inside and oustide the particle
-			widthBox = np.min((np.max(dataMaskDistance), np.max(dataOutsideDistance)))
-		halfWidthBox = np.floor(widthBox/2)
-		cubeSize     = 2*halfWidthBox
-
-		# Extract a cube from inside the particle
-		insideBox    = np.unravel_index(np.argmax(dataMaskDistance),(n,n,n))
-
-		# HACK: Make sure indices are cubeSize away from the edges
-		insideBox = np.maximum(insideBox,[cubeSize, cubeSize, cubeSize])
-		insideBox = np.minimum(insideBox,[n-cubeSize, n-cubeSize, n-cubeSize])
-		# insideBox += cubeSize*np.less(insideBox, cubeSize)
-		# insideBox -= cubeSize*np.greater(insideBox, n-cubeSize)
-
-		cubeInside   = data[insideBox[0]-halfWidthBox:insideBox[0]+halfWidthBox,
-							insideBox[1]-halfWidthBox:insideBox[1]+halfWidthBox,
-							insideBox[2]-halfWidthBox:insideBox[2]+halfWidthBox ];
-
-		if splitVolume == True:
-			# Extract the same cube from the difference map
-			cubeOutside  = dataDiff[insideBox[0]-halfWidthBox:insideBox[0]+halfWidthBox,
-									insideBox[1]-halfWidthBox:insideBox[1]+halfWidthBox,
-									insideBox[2]-halfWidthBox:insideBox[2]+halfWidthBox ];
-		else:
-			# Extract a cube from outside the particle
-			outsideBox   = np.unravel_index(np.argmax(dataOutsideDistance),(n,n,n))
-			cubeOutside  = data[outsideBox[0]-halfWidthBox:outsideBox[0]+halfWidthBox,
-								outsideBox[1]-halfWidthBox:outsideBox[1]+halfWidthBox,
-								outsideBox[2]-halfWidthBox:outsideBox[2]+halfWidthBox ];
-
-		# Create a hamming window
-		hammingWindow1D = signal.hamming(cubeSize)
-		hammingWindow2D = array_outer_product(hammingWindow1D,hammingWindow1D)
-		hammingWindow3D = array_outer_product(hammingWindow2D,hammingWindow2D)
-
-		# Multiply both cubes by the hamming window
-		cubeInside      = np.multiply(cubeInside, hammingWindow3D)
-		cubeOutside     = np.multiply(cubeOutside,hammingWindow3D)
-
-		# Calculate spectrum of inside volume
-		(dataF,   dataSpect)   = calculatePowerSpectrum(cubeInside)
-
-		# Calculate spectrum of outside volume
-		(dataBGF, dataBGSpect) = calculatePowerSpectrum(cubeOutside)
-
-		del hammingWindow1D, hammingWindow2D, hammingWindow3D
-
-		m, s = divmod(time() - tStart, 60)
-		print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
-
-		#   While: the user changes the elbow in the Pre-Whitening Interface, repeat: the pre-whitening.
-		# 	This loop will stop when the user does NOT change the elbow in the interface.
-		#	It is a bit of a hack, but it works completely within matplotlib (which is a relief)
-		while newElbowAngstrom != oldElbowAngstrom or oldRampWeight != newRampWeight:
-
-			preWhiteningResult = preWhitenCube( n = cubeSize,
-									vxSize        = vxSize,
-									elbowAngstrom = newElbowAngstrom,
-									rampWeight    = newRampWeight,
-									dataF         = dataF,
-									dataBGF       = dataBGF,
-									dataBGSpect   = dataBGSpect)
-
-			cubeInsidePW = preWhiteningResult['dataPW']
-
-			oldElbowAngstrom = newElbowAngstrom
-			oldRampWeight    = newRampWeight
-
-			newElbowAngstrom, newRampWeight = displayPreWhitening(
-								elbowAngstrom = oldElbowAngstrom,
-								rampWeight    = oldRampWeight,
-								dataSpect     = dataSpect,
-								dataBGSpect   = dataBGSpect,
-								peval         = preWhiteningResult['peval'],
-								dataPWSpect   = preWhiteningResult['dataPWSpect'],
-								dataPWBGSpect = preWhiteningResult['dataPWBGSpect'],
-								vxSize 		  = vxSize,
-								dataSlice     = cubeInside[int(cubeSize/2),:,:],
-								dataPWSlice   = cubeInsidePW[int(cubeSize/2),:,:]
-								)
-
-
-		print '\n= Pre-whitening the Full Volume (this might take a bit of time...)'
-		tStart = time()
-
-		# Apply the pre-whitening filter on the full-sized map
-		(dataF, dataPowerSpectrum) = calculatePowerSpectrum(data)
-		if splitVolume == True:
-			(dataDiffF, dataPowerSpectrumDoff) = calculatePowerSpectrum(dataDiff)
-
-		R = createRmatrix(n)
-
-		pwFilterFinal = createPreWhiteningFilterFinal(	n = n,
-											cubeSize      = cubeSize,
-											spectrum      = dataPowerSpectrum,
-											pcoef         = preWhiteningResult['pcoef'],
-											elbowAngstrom = newElbowAngstrom,
-											rampWeight    = newRampWeight,
-											vxSize        = vxSize)
-
-		dataPW     = np.real(fftpack.ifftn(fftpack.ifftshift(np.multiply(pwFilterFinal['pWfilter'],dataF))))
-		if splitVolume == True:
-			dataDiffPW = np.real(fftpack.ifftn(fftpack.ifftshift(np.multiply(pwFilterFinal['pWfilter'],dataDiffF))))
-
-		m, s = divmod(time() - tStart, 60)
-		print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
-
-		# Pre-whitening Results Plots
-		f, ((ax1, ax2, ax3, ax4), (ax5, ax6, ax7, ax8)) = plt.subplots(2, 4, figsize=(18, 9))
-		f.suptitle('Pre-Whitening Results', fontsize=14, color='#104E8B', fontweight='bold')
-
-		vminData, vmaxData = np.min(data), np.max(data)
-		ax1.imshow(data[(3*n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
-		ax2.imshow(data[(4*n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
-		ax3.imshow(data[(5*n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
-		ax4.imshow(data[(6*n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
-
-		vminDataPW, vmaxDataPW = np.min(dataPW), np.max(dataPW)
-		ax5.imshow(dataPW[(3*n/9),:,:], vmin=vminDataPW, vmax=vmaxDataPW, cmap=plt.cm.gray, interpolation="nearest")
-		ax6.imshow(dataPW[(4*n/9),:,:], vmin=vminDataPW, vmax=vmaxDataPW, cmap=plt.cm.gray, interpolation="nearest")
-		ax7.imshow(dataPW[(5*n/9),:,:], vmin=vminDataPW, vmax=vmaxDataPW, cmap=plt.cm.gray, interpolation="nearest")
-		ax8.imshow(dataPW[(6*n/9),:,:], vmin=vminDataPW, vmax=vmaxDataPW, cmap=plt.cm.gray, interpolation="nearest")
-
-		ax1.set_title('Slice ' + str(int(3*n/9)), fontsize=10, color='#104E8B')
-		ax2.set_title('Slice ' + str(int(4*n/9)), fontsize=10, color='#104E8B')
-		ax3.set_title('Slice ' + str(int(5*n/9)), fontsize=10, color='#104E8B')
-		ax4.set_title('Slice ' + str(int(6*n/9)), fontsize=10, color='#104E8B')
-
-		ax5.set_title('Slice ' + str(int(3*n/9)), fontsize=10, color='#104E8B')
-		ax6.set_title('Slice ' + str(int(4*n/9)), fontsize=10, color='#104E8B')
-		ax7.set_title('Slice ' + str(int(5*n/9)), fontsize=10, color='#104E8B')
-		ax8.set_title('Slice ' + str(int(6*n/9)), fontsize=10, color='#104E8B')
-
-		ax1.set_ylabel('Input Volume\n\n',        fontsize=14, color='#104E8B', fontweight='bold')
-		ax5.set_ylabel('Pre-whitened Volume\n\n', fontsize=14, color='#104E8B', fontweight='bold')
-
-		plt.show()
-
-		# Set the data to be the pre-whitened volume
-		data     = dataPW
-		if splitVolume == True:
-			dataDiff = dataDiffPW
-			del dataDiffF, dataDiffPW
-		del dataF, dataPW, R
-
+	#################################
+	#
+	#   Compute ResMap
+	#
+	#################################
+	if splitVolume == False:
+		computeResMapResult = computeResMap(
+															data         = data,
+															Rinside      = Rinside,
+															mask         = mask,
+															splitVolume  = splitVolume,
+															currentRes   = currentRes,
+															vxSize       = vxSize,
+															LPFfactor    = LPFfactor,
+															debugMode    = debugMode,
+															pValue       = pValue,
+															oldSumOfMask = oldSumOfMask,
+															stepRes     = stepRes,
+															maxRes     = maxRes,
+															orig_n     = orig_n
+															)
 	else:
+		computeResMapResult = computeResMap(
+															data         = data,
+															Rinside      = Rinside,
+															mask         = mask,
+															splitVolume  = splitVolume,
+															currentRes   = currentRes,
+															vxSize       = vxSize,
+															dataDiff     = dataDiff,
+															LPFfactor    = LPFfactor,
+															debugMode    = debugMode,
+															pValue       = pValue,
+															oldSumOfMask = oldSumOfMask,
+															stepRes     = stepRes,
+															maxRes     = maxRes,
+															orig_n     = orig_n
+															)
 
-		print("\n=======================================================================\n"
-				"|                                                                     |\n"
-				"|                 ResMap Pre-Whitening (beta) Tool                    |\n"
-				"|                                                                     |\n"
-				"|                 The volume is of reasonable size.                   |\n"
-				"|                                                                     |\n"
-				"|        ResMap will run its pre-whitening on the whole volume        |\n"
-				"|         by softly masking the background from the particle.         |\n"
-				"|                                                                     |\n"
-				"|               In split volume mode, ResMap will use                 |\n"
-				"|             the difference map instead of a soft mask.              |\n"
-				"|                                                                     |\n"
-				"=======================================================================")
+	resTOTAL   = computeResMapResult['resTOTAL']
+	resTOTALma = computeResMapResult['resTOTALma']
+	resHisto   = computeResMapResult['resHisto']
 
-		if splitVolume == False:
-			print '\n= Computing Soft Mask Separating Particle from Background'
-			tStart = time()
 
-			# Dilate the mask a bit so that we don't seep into the particle when we blur it later
-			boxElement  = np.ones([5, 5, 5])
-			dilatedMask = ndimage.morphology.binary_dilation(dataMask, structure=boxElement, iterations=3)
-			dilatedMask = np.logical_and(dilatedMask, Rinside)
+	m, s = divmod(time() - tBegin, 60)
+	print "\nTOTAL :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
 
-			# Blur the mask
-			softBGmask  = filters.gaussian_filter(np.array(np.logical_not(dilatedMask),dtype='float32'),float(n)*0.02)
 
-			# Get the background
-			dataBG      = np.multiply(data,softBGmask)
-			del boxElement, dataMask, dilatedMask
+	# Write results out as MRC volume
+	if splitVolume == True:
+		(fname,ext)    = os.path.splitext(inputFileName1)
+		dataMRC1.matrix = np.array(resTOTAL,dtype='float32')
+		write_mrc2000_grid_data(dataMRC1, fname+"_resmap"+ext)
+	else:
+		(fname,ext)    = os.path.splitext(inputFileName)
+		dataMRC.matrix = np.array(resTOTAL,dtype='float32')
+		write_mrc2000_grid_data(dataMRC, fname+"_resmap"+ext)
 
-			m, s = divmod(time() - tStart, 60)
-			print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
-		else:
-			dataBG = dataDiff
 
-		print '\n= Calculating Spherically Averaged Power Spectra'
-		tStart = time()
+	print "\nRESULT WRITTEN to MRC file: " + fname + "_resmap" + ext
 
-		# Calculate spectrum of input volume only if downsampled, otherwise use previous computation
-		if LPFfactor != 0.0 or n > subVolLPF:
-			(dataF, dataPowerSpectrum) = calculatePowerSpectrum(data)
+	if splitVolume == True:
+		chimeraScriptFileName = createChimeraScript(inputFileName1, minRes, maxRes, int(resTOTAL.shape[0]), animated=True)
+	else:
+		chimeraScriptFileName = createChimeraScript(inputFileName, minRes, maxRes, int(resTOTAL.shape[0]), animated=True)
 
-		# Calculate spectrum of background volume
-		(dataBGF, dataBGSpect) = calculatePowerSpectrum(dataBG)
-		del dataBG
+	print "\nCHIMERA SCRIPT WRITTEN to: " + chimeraScriptFileName
 
-		m, s = divmod(time() - tStart, 60)
-		print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
+	if chimeraLaunch == True:
+		print "\nATTEMPTING TO LAUNCH CHIMERA... "
+		locations = ["",
+					 "/Applications/Chimera.app/Contents/MacOS/",
+					 "/usr/local/bin/",
+					 "C:\\Program Files\\Chimera\\bin\\",
+					 "C:\\Program Files\\Chimera 1.6\\bin\\",
+					 "C:\\Program Files\\Chimera 1.7\\bin\\",
+					 "C:\\Program Files\\Chimera 1.8\\bin\\",
+					 "C:\\Program Files (x86)\\Chimera\\bin\\",
+					 "C:\\Program Files (x86)\\Chimera 1.6\\bin\\",
+					 "C:\\Program Files (x86)\\Chimera 1.7\\bin\\",
+					 "C:\\Program Files (x86)\\Chimera 1.8\\bin\\"]
+		try:
+			try_alternatives("chimera", locations, ["--send", chimeraScriptFileName])
+		except OSError:
+			print "\n\n\n!!! ResMap is having trouble finding and/or launching UCSF Chimera. Please manually load the script into Chimera. !!!\n\n\n"
 
-		#   While: the user changes the elbow in the Pre-Whitening Interface, repeat: the pre-whitening.
-		# 	This loop will stop when the user does NOT change the elbow in the interface.
-		#	It is a bit of a hack, but it works completely within matplotlib (which is a relief)
-		while newElbowAngstrom != oldElbowAngstrom or oldRampWeight != newRampWeight:
 
-			if splitVolume == False:
-				preWhiteningResult = preWhitenVolumeSoftBG(n = n,
-										elbowAngstrom = newElbowAngstrom,
-										dataBGSpect   = dataBGSpect,
-										dataF         = dataF,
-										softBGmask    = softBGmask,
-										vxSize        = vxSize,
-										rampWeight    = newRampWeight)
-			else:
-				preWhiteningResult = preWhitenCube( n = n,
-										vxSize        = vxSize,
-										elbowAngstrom = newElbowAngstrom,
-										rampWeight    = newRampWeight,
-										dataF         = dataF,
-										dataBGF       = dataBGF,
-										dataBGSpect   = dataBGSpect)
+	#################################
+	#
+	#   Call 2D visualization
+	#
+	#################################
+	if graphicalOutput == True:
+		visualize2Doutput(
+											dataOrig   = dataOrig,
+											minRes     = minRes,
+											maxRes     = maxRes,
+											resTOTALma = resTOTALma,
+											resHisto   = resHisto
+                  		)
 
-			dataPW   = preWhiteningResult['dataPW']
-			if splitVolume == True:
-				dataBGPW = preWhiteningResult['dataBGPW']
+	computeResMapResult['minRes'] = minRes
+	computeResMapResult['maxRes'] = maxRes
+	computeResMapResult['orig_n'] = orig_n
+	computeResMapResult['n'] = resTOTALma.shape[0]
 
-			oldElbowAngstrom = newElbowAngstrom
-			oldRampWeight    = newRampWeight
+	return computeResMapResult
 
-			newElbowAngstrom, newRampWeight = displayPreWhitening(
-								elbowAngstrom = oldElbowAngstrom,
-								rampWeight    = oldRampWeight,
-								dataSpect     = dataPowerSpectrum,
-								dataBGSpect   = dataBGSpect,
-								peval         = preWhiteningResult['peval'],
-								dataPWSpect   = preWhiteningResult['dataPWSpect'],
-								dataPWBGSpect = preWhiteningResult['dataPWBGSpect'],
-								vxSize 		  = vxSize,
-								dataSlice     = data[int(n/2),:,:],
-								dataPWSlice   = dataPW[int(n/2),:,:]
-								)
 
-			del preWhiteningResult
 
-		data     = dataPW
-		if splitVolume == True:
-			dataDiff = dataBGPW
-			del dataBGPW
-		del dataF, dataBGF, dataPW
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def computeResMap(**kwargs):
+
+	data        = kwargs.get('data', None)
+	Rinside     = kwargs.get('Rinside', None)
+	mask        = kwargs.get('mask', None)
+	splitVolume = kwargs.get('splitVolume', False)
+
+	currentRes  = kwargs.get('currentRes', None)
+	vxSize      = kwargs.get('vxSize', None)
+
+	dataDiff    = kwargs.get('dataDiff', None)
+
+	LPFfactor   = kwargs.get('LPFfactor', None)
+
+	debugMode   = kwargs.get('debugMode', False)
+
+	pValue   = kwargs.get('pValue', None)
+
+	oldSumOfMask   = kwargs.get('oldSumOfMask', None)
+
+	stepRes   = kwargs.get('stepRes', 0.0)
+	maxRes   = kwargs.get('maxRes', 0.0)
+	minRes   = kwargs.get('minRes', 0.0)
+
+	orig_n   = kwargs.get('orig_n', 0.0)
+
 
 	print("\n=======================================================================\n"
 			"|                                                                     |\n"
 			"|                     ResMap Computation BEGINS                       |\n"
 			"|                                                                     |\n"
 			"=======================================================================")
+
+	n = data.shape[0]
 
 	# Initialize the ResMap result volume
 	resTOTAL = np.zeros_like(data)
@@ -875,16 +723,10 @@ def ResMap_algorithm(**kwargs):
 	print "\n  MEAN RESOLUTION in MASK = %.2f" % np.ma.mean(resTOTALma)
 	print "MEDIAN RESOLUTION in MASK = %.2f" % np.ma.median(resTOTALma)
 
-	if splitVolume == True:
-		dataOrig = dataMRC1.matrix
-		old_n    = dataMRC1.data_size[0]
-	else:
-		dataOrig = dataMRC.matrix
-		old_n    = dataMRC.data_size[0]
 
-	old_coordinates = np.mgrid[	0:n-1:complex(0,old_n),
-								0:n-1:complex(0,old_n),
-								0:n-1:complex(0,old_n) ]
+	old_coordinates = np.mgrid[	0:n-1:complex(0,orig_n),
+								0:n-1:complex(0,orig_n),
+								0:n-1:complex(0,orig_n) ]
 
 	# Up-sample the resulting resolution map if necessary
 	if LPFfactor > 0:
@@ -894,94 +736,659 @@ def ResMap_algorithm(**kwargs):
 
 		resTOTALma = np.ma.masked_where(resTOTAL > currentRes, resTOTAL, copy=True)
 
-	# Write results out as MRC volume
-	if splitVolume == True:
-		(fname,ext)    = os.path.splitext(inputFileName1)
-		dataMRC1.matrix = np.array(resTOTAL,dtype='float32')
-		write_mrc2000_grid_data(dataMRC1, fname+"_resmap"+ext)
+	return {'resTOTAL':resTOTAL, 'resTOTALma':resTOTALma,
+			'resHisto':resHisto, 'currentRes': currentRes}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def preWhiteningLoop(**kwargs):
+
+	# Get inputs
+	data              = kwargs.get('data', None)
+	dataF             = kwargs.get('dataF', None)
+	dataPowerSpectrum = kwargs.get('dataPowerSpectrum', None)
+	dataDiff          = kwargs.get('dataDiff', None)
+	vxSize            = kwargs.get('vxSize', 0.0)
+	subVolLPF         = kwargs.get('subVolLPF', 0.0)
+	dataMask          = kwargs.get('dataMask', None)
+	splitVolume       = kwargs.get('splitVolume', False)
+	Rinside           = kwargs.get('Rinside', None)
+	LPFfactor         = kwargs.get('LPFfactor', None)
+
+	n = data.shape[0]
+
+
+	# Allow to pass previous params for pre-whitening and avoid to 
+	# launch the gui from scratch
+	scipionPrewhitenParams = kwargs.get('scipionPrewhitenParams', {})
+
+	# We take a first shot at ramping the spectrum up/down beyond 10A
+	oldElbowAngstrom = 0
+	#newElbowAngstrom = max(10,2.1*vxSize)
+	newElbowAngstrom = scipionPrewhitenParams.get('newElbowAngstrom', max(10,2.1*vxSize))
+
+	# Sometimes the ramping is too much, so we allow the user to adjust it
+	oldRampWeight = 0.0
+	#newRampWeight = 1.0
+	newRampWeight = scipionPrewhitenParams.get('newRampWeight', 1.0)
+	
+	if n > subVolLPF:
+
+		print("\n=======================================================================\n"
+				"|                                                                     |\n"
+				"|                 ResMap Pre-Whitening (beta) Tool                    |\n"
+				"|                                                                     |\n"
+				"|                    The volume is quite large.                       |\n"
+				"|                                                                     |\n"
+				"|          ResMap will run its pre-whitening on the largest           |\n"
+				"|     cube it can fit within the particle and in the background.      |\n"
+				"|                                                                     |\n"
+				"|          In split volume mode, ResMap will only fit a cube          |\n"
+				"|  inside the particle and use the difference map as the background.  |\n"
+				"|                                                                     |\n"
+				"=======================================================================\n")
+
+		print '\n= Computing The Largest Cube Within the Particle'
+		tStart = time()
+
+		dataMaskDistance = ndimage.morphology.distance_transform_cdt(dataMask, metric='taxicab')
+
+		m, s = divmod(time() - tStart, 60)
+		print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
+
+		# Only need to compute largest cube in background if in single volume mode
+		if splitVolume == False:
+			print '\n= Computing The Largest Cube in the Background'
+			tStart = time()
+
+			dataOutside         = np.logical_and(np.logical_not(dataMask),Rinside)
+			dataOutsideDistance = ndimage.morphology.distance_transform_cdt(dataOutside, metric='taxicab')
+
+			m, s = divmod(time() - tStart, 60)
+			print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
+
+		print '\n= Extracting Cubes and Calculating Spherically Averaged Power Spectra'
+		tStart = time()
+
+		# Calculate the largest box size that can be fit
+		if splitVolume == True:
+			# Biggest cube that fits just inside the particle
+			widthBox = np.max(dataMaskDistance)
+		else:
+			# Biggest cube that fits both inside and oustide the particle
+			widthBox = np.min((np.max(dataMaskDistance), np.max(dataOutsideDistance)))
+		halfWidthBox = np.floor(widthBox/2)
+		cubeSize     = 2*halfWidthBox
+
+		# Extract a cube from inside the particle
+		insideBox    = np.unravel_index(np.argmax(dataMaskDistance),(n,n,n))
+
+		# HACK: Make sure indices are cubeSize away from the edges
+		insideBox = np.maximum(insideBox,[cubeSize, cubeSize, cubeSize])
+		insideBox = np.minimum(insideBox,[n-cubeSize, n-cubeSize, n-cubeSize])
+		# insideBox += cubeSize*np.less(insideBox, cubeSize)
+		# insideBox -= cubeSize*np.greater(insideBox, n-cubeSize)
+
+		cubeInside   = data[insideBox[0]-halfWidthBox:insideBox[0]+halfWidthBox,
+							insideBox[1]-halfWidthBox:insideBox[1]+halfWidthBox,
+							insideBox[2]-halfWidthBox:insideBox[2]+halfWidthBox ];
+
+		if splitVolume == True:
+			# Extract the same cube from the difference map
+			cubeOutside  = dataDiff[insideBox[0]-halfWidthBox:insideBox[0]+halfWidthBox,
+									insideBox[1]-halfWidthBox:insideBox[1]+halfWidthBox,
+									insideBox[2]-halfWidthBox:insideBox[2]+halfWidthBox ];
+		else:
+			# Extract a cube from outside the particle
+			outsideBox   = np.unravel_index(np.argmax(dataOutsideDistance),(n,n,n))
+			cubeOutside  = data[outsideBox[0]-halfWidthBox:outsideBox[0]+halfWidthBox,
+								outsideBox[1]-halfWidthBox:outsideBox[1]+halfWidthBox,
+								outsideBox[2]-halfWidthBox:outsideBox[2]+halfWidthBox ];
+
+		# Create a hamming window
+		hammingWindow1D = signal.hamming(cubeSize)
+		hammingWindow2D = array_outer_product(hammingWindow1D,hammingWindow1D)
+		hammingWindow3D = array_outer_product(hammingWindow2D,hammingWindow2D)
+
+		# Multiply both cubes by the hamming window
+		cubeInside      = np.multiply(cubeInside, hammingWindow3D)
+		cubeOutside     = np.multiply(cubeOutside,hammingWindow3D)
+
+		# Calculate spectrum of inside volume
+		(dataF,   dataSpect)   = calculatePowerSpectrum(cubeInside)
+
+		# Calculate spectrum of outside volume
+		(dataBGF, dataBGSpect) = calculatePowerSpectrum(cubeOutside)
+
+		del hammingWindow1D, hammingWindow2D, hammingWindow3D
+
+		m, s = divmod(time() - tStart, 60)
+		print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
+
+		if scipionPrewhitenParams.get('force-stop', False):
+			return locals()
+		
+		#   While: the user changes the elbow in the Pre-Whitening Interface, repeat: the pre-whitening.
+		# 	This loop will stop when the user does NOT change the elbow in the interface.
+		#	It is a bit of a hack, but it works completely within matplotlib (which is a relief)
+		while newElbowAngstrom != oldElbowAngstrom or oldRampWeight != newRampWeight:
+
+			preWhiteningResult = preWhitenCube( n = cubeSize,
+									vxSize        = vxSize,
+									elbowAngstrom = newElbowAngstrom,
+									rampWeight    = newRampWeight,
+									dataF         = dataF,
+									dataBGF       = dataBGF,
+									dataBGSpect   = dataBGSpect)
+
+			cubeInsidePW = preWhiteningResult['dataPW']
+
+			oldElbowAngstrom = newElbowAngstrom
+			oldRampWeight    = newRampWeight
+			
+			
+			if scipionPrewhitenParams.get('display', True):
+				newElbowAngstrom, newRampWeight = displayPreWhitening(
+									elbowAngstrom = oldElbowAngstrom,
+									rampWeight    = oldRampWeight,
+									dataSpect     = dataSpect,
+									dataBGSpect   = dataBGSpect,
+									peval         = preWhiteningResult['peval'],
+									dataPWSpect   = preWhiteningResult['dataPWSpect'],
+									dataPWBGSpect = preWhiteningResult['dataPWBGSpect'],
+									vxSize 		  = vxSize,
+									dataSlice     = cubeInside[int(cubeSize/2),:,:],
+									dataPWSlice   = cubeInsidePW[int(cubeSize/2),:,:]
+									)
+
+
+		print '\n= Pre-whitening the Full Volume (this might take a bit of time...)'
+		tStart = time()
+
+		# Apply the pre-whitening filter on the full-sized map
+		(dataF, dataPowerSpectrum) = calculatePowerSpectrum(data)
+		if splitVolume == True:
+			(dataDiffF, dataPowerSpectrumDoff) = calculatePowerSpectrum(dataDiff)
+
+		pwFilterFinal = createPreWhiteningFilterFinal(	n = n,
+											cubeSize      = cubeSize,
+											spectrum      = dataPowerSpectrum,
+											pcoef         = preWhiteningResult['pcoef'],
+											elbowAngstrom = newElbowAngstrom,
+											rampWeight    = newRampWeight,
+											vxSize        = vxSize)
+
+		dataPW     = np.real(fftpack.ifftn(fftpack.ifftshift(np.multiply(pwFilterFinal['pWfilter'],dataF))))
+		if splitVolume == True:
+			dataDiffPW = np.real(fftpack.ifftn(fftpack.ifftshift(np.multiply(pwFilterFinal['pWfilter'],dataDiffF))))
+
+		m, s = divmod(time() - tStart, 60)
+		print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
+
+		if scipionPrewhitenParams.get('display', True):
+			# Pre-whitening Results Plots
+			f, ((ax1, ax2, ax3, ax4), (ax5, ax6, ax7, ax8)) = plt.subplots(2, 4, figsize=(18, 9))
+			f.suptitle('Pre-Whitening Results', fontsize=14, color='#104E8B', fontweight='bold')
+	
+			vminData, vmaxData = np.min(data), np.max(data)
+			ax1.imshow(data[(3*n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
+			ax2.imshow(data[(4*n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
+			ax3.imshow(data[(5*n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
+			ax4.imshow(data[(6*n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
+	
+			vminDataPW, vmaxDataPW = np.min(dataPW), np.max(dataPW)
+			ax5.imshow(dataPW[(3*n/9),:,:], vmin=vminDataPW, vmax=vmaxDataPW, cmap=plt.cm.gray, interpolation="nearest")
+			ax6.imshow(dataPW[(4*n/9),:,:], vmin=vminDataPW, vmax=vmaxDataPW, cmap=plt.cm.gray, interpolation="nearest")
+			ax7.imshow(dataPW[(5*n/9),:,:], vmin=vminDataPW, vmax=vmaxDataPW, cmap=plt.cm.gray, interpolation="nearest")
+			ax8.imshow(dataPW[(6*n/9),:,:], vmin=vminDataPW, vmax=vmaxDataPW, cmap=plt.cm.gray, interpolation="nearest")
+	
+			ax1.set_title('Slice ' + str(int(3*n/9)), fontsize=10, color='#104E8B')
+			ax2.set_title('Slice ' + str(int(4*n/9)), fontsize=10, color='#104E8B')
+			ax3.set_title('Slice ' + str(int(5*n/9)), fontsize=10, color='#104E8B')
+			ax4.set_title('Slice ' + str(int(6*n/9)), fontsize=10, color='#104E8B')
+	
+			ax5.set_title('Slice ' + str(int(3*n/9)), fontsize=10, color='#104E8B')
+			ax6.set_title('Slice ' + str(int(4*n/9)), fontsize=10, color='#104E8B')
+			ax7.set_title('Slice ' + str(int(5*n/9)), fontsize=10, color='#104E8B')
+			ax8.set_title('Slice ' + str(int(6*n/9)), fontsize=10, color='#104E8B')
+	
+			ax1.set_ylabel('Input Volume\n\n',        fontsize=14, color='#104E8B', fontweight='bold')
+			ax5.set_ylabel('Pre-whitened Volume\n\n', fontsize=14, color='#104E8B', fontweight='bold')
+	
+			plt.show()
+
+		# Set the data to be the pre-whitened volume
+		data     = dataPW
+		if splitVolume == True:
+			dataDiff = dataDiffPW
+			del dataDiffF, dataDiffPW
+		del dataF, dataPW
+
 	else:
-		(fname,ext)    = os.path.splitext(inputFileName)
-		dataMRC.matrix = np.array(resTOTAL,dtype='float32')
-		write_mrc2000_grid_data(dataMRC, fname+"_resmap"+ext)
 
-	m, s = divmod(time() - tBegin, 60)
-	print "\nTOTAL :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
+		print("\n=======================================================================\n"
+				"|                                                                     |\n"
+				"|                 ResMap Pre-Whitening (beta) Tool                    |\n"
+				"|                                                                     |\n"
+				"|                 The volume is of reasonable size.                   |\n"
+				"|                                                                     |\n"
+				"|        ResMap will run its pre-whitening on the whole volume        |\n"
+				"|         by softly masking the background from the particle.         |\n"
+				"|                                                                     |\n"
+				"|               In split volume mode, ResMap will use                 |\n"
+				"|             the difference map instead of a soft mask.              |\n"
+				"|                                                                     |\n"
+				"=======================================================================")
 
-	print "\nRESULT WRITTEN to MRC file: " + fname + "_resmap" + ext
+		if splitVolume == False:
+			print '\n= Computing Soft Mask Separating Particle from Background'
+			tStart = time()
 
-	if splitVolume == True:
-		chimeraScriptFileName = createChimeraScript(inputFileName1, minRes, maxRes, int(resTOTAL.shape[0]), animated=True)
+			# Dilate the mask a bit so that we don't seep into the particle when we blur it later
+			boxElement  = np.ones([5, 5, 5])
+			dilatedMask = ndimage.morphology.binary_dilation(dataMask, structure=boxElement, iterations=3)
+			dilatedMask = np.logical_and(dilatedMask, Rinside)
+
+			# Blur the mask
+			softBGmask  = filters.gaussian_filter(np.array(np.logical_not(dilatedMask),dtype='float32'),float(n)*0.02)
+
+			# Get the background
+			dataBG      = np.multiply(data,softBGmask)
+			del boxElement, dataMask, dilatedMask
+
+			m, s = divmod(time() - tStart, 60)
+			print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
+		else:
+			dataBG = dataDiff
+
+		print '\n= Calculating Spherically Averaged Power Spectra'
+		tStart = time()
+
+		# Calculate spectrum of input volume only if downsampled, otherwise use previous computation
+		if LPFfactor != 0.0 or n > subVolLPF:
+			(dataF, dataPowerSpectrum) = calculatePowerSpectrum(data)
+
+		# Calculate spectrum of background volume
+		(dataBGF, dataBGSpect) = calculatePowerSpectrum(dataBG)
+		del dataBG
+
+		m, s = divmod(time() - tStart, 60)
+		print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
+		
+		if scipionPrewhitenParams.get('force-stop', False):
+			return locals()
+
+		#   While: the user changes the elbow in the Pre-Whitening Interface, repeat: the pre-whitening.
+		# 	This loop will stop when the user does NOT change the elbow in the interface.
+		#	It is a bit of a hack, but it works completely within matplotlib (which is a relief)
+		while newElbowAngstrom != oldElbowAngstrom or oldRampWeight != newRampWeight:
+
+			if splitVolume == False:
+				preWhiteningResult = preWhitenVolumeSoftBG(n = n,
+										elbowAngstrom = newElbowAngstrom,
+										dataBGSpect   = dataBGSpect,
+										dataF         = dataF,
+										softBGmask    = softBGmask,
+										vxSize        = vxSize,
+										rampWeight    = newRampWeight)
+			else:
+				preWhiteningResult = preWhitenCube( n = n,
+										vxSize        = vxSize,
+										elbowAngstrom = newElbowAngstrom,
+										rampWeight    = newRampWeight,
+										dataF         = dataF,
+										dataBGF       = dataBGF,
+										dataBGSpect   = dataBGSpect)
+
+			dataPW   = preWhiteningResult['dataPW']
+			if splitVolume == True:
+				dataBGPW = preWhiteningResult['dataBGPW']
+
+			oldElbowAngstrom = newElbowAngstrom
+			oldRampWeight    = newRampWeight
+
+			if scipionPrewhitenParams.get('display', True):
+				newElbowAngstrom, newRampWeight = displayPreWhitening(
+									elbowAngstrom = oldElbowAngstrom,
+									rampWeight    = oldRampWeight,
+									dataSpect     = dataPowerSpectrum,
+									dataBGSpect   = dataBGSpect,
+									peval         = preWhiteningResult['peval'],
+									dataPWSpect   = preWhiteningResult['dataPWSpect'],
+									dataPWBGSpect = preWhiteningResult['dataPWBGSpect'],
+									vxSize 		  = vxSize,
+									dataSlice     = data[int(n/2),:,:],
+									dataPWSlice   = dataPW[int(n/2),:,:]
+									)
+
+			del preWhiteningResult
+
+		data     = dataPW
+		if splitVolume == True:
+			dataDiff = dataBGPW
+			del dataBGPW
+		del dataF, dataBGF, dataPW
+
+
+	if splitVolume == False:
+		return {'data': data, 
+				'newElbowAngstrom': newElbowAngstrom,
+				'newRampWeight': newRampWeight}
 	else:
-		chimeraScriptFileName = createChimeraScript(inputFileName, minRes, maxRes, int(resTOTAL.shape[0]), animated=True)
+		return {'data': data, 
+				'dataDiff': dataDiff,
+				'newElbowAngstrom': newElbowAngstrom,
+				'newRampWeight': newRampWeight}
 
-	print "\nCHIMERA SCRIPT WRITTEN to: " + chimeraScriptFileName
 
-	if chimeraLaunch == True:
-		print "\nATTEMPTING TO LAUNCH CHIMERA... "
-		locations = ["",
-					 "/Applications/Chimera.app/Contents/MacOS/",
-					 "/usr/local/bin/",
-					 "C:\\Program Files\\Chimera\\bin\\",
-					 "C:\\Program Files\\Chimera 1.6\\bin\\",
-					 "C:\\Program Files\\Chimera 1.7\\bin\\",
-					 "C:\\Program Files\\Chimera 1.8\\bin\\",
-					 "C:\\Program Files (x86)\\Chimera\\bin\\",
-					 "C:\\Program Files (x86)\\Chimera 1.6\\bin\\",
-					 "C:\\Program Files (x86)\\Chimera 1.7\\bin\\",
-					 "C:\\Program Files (x86)\\Chimera 1.8\\bin\\"]
-		try:
-			try_alternatives("chimera", locations, ["--send", chimeraScriptFileName])
-		except OSError:
-			print "\n\n\n!!! ResMap is having trouble finding and/or launching UCSF Chimera. Please manually load the script into Chimera. !!!\n\n\n"
 
-	if graphicalOutput == True:
 
-		# Plots
-		f, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2)
-		f.suptitle('Slices Through Input Volume', fontsize=14, color='#104E8B', fontweight='bold')
-		vminData, vmaxData = np.min(dataOrig), np.max(dataOrig)
-		ax1.imshow(dataOrig[int(3*old_n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
-		ax2.imshow(dataOrig[int(4*old_n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
-		ax3.imshow(dataOrig[int(5*old_n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
-		ax4.imshow(dataOrig[int(6*old_n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
 
-		ax1.set_title('Slice ' + str(int(3*n/9)), fontsize=10, color='#104E8B')
-		ax2.set_title('Slice ' + str(int(4*n/9)), fontsize=10, color='#104E8B')
-		ax3.set_title('Slice ' + str(int(5*n/9)), fontsize=10, color='#104E8B')
-		ax4.set_title('Slice ' + str(int(6*n/9)), fontsize=10, color='#104E8B')
 
-		f2, ((ax21, ax22), (ax23, ax24)) = plt.subplots(2, 2)
-		f2.suptitle('Slices Through ResMap Results', fontsize=14, color='#104E8B', fontweight='bold')
-		# ax21.imshow(dataOrig[int(3*old_n/9),:,:], cmap=plt.cm.gray, interpolation="nearest")
-		# ax22.imshow(dataOrig[int(4*old_n/9),:,:], cmap=plt.cm.gray, interpolation="nearest")
-		# ax23.imshow(dataOrig[int(5*old_n/9),:,:], cmap=plt.cm.gray, interpolation="nearest")
-		# ax24.imshow(dataOrig[int(6*old_n/9),:,:], cmap=plt.cm.gray, interpolation="nearest")
-		vminRes, vmaxRes = minRes, maxRes
-		im = ax21.imshow(resTOTALma[int(3*old_n/9),:,:], vmin=vminRes, vmax=vmaxRes, cmap=plt.cm.jet, interpolation="nearest")#, alpha=0.25)
-		ax22.imshow(     resTOTALma[int(4*old_n/9),:,:], vmin=vminRes, vmax=vmaxRes, cmap=plt.cm.jet, interpolation="nearest")#, alpha=0.25)
-		ax23.imshow(     resTOTALma[int(5*old_n/9),:,:], vmin=vminRes, vmax=vmaxRes, cmap=plt.cm.jet, interpolation="nearest")#, alpha=0.25)
-		ax24.imshow(     resTOTALma[int(6*old_n/9),:,:], vmin=vminRes, vmax=vmaxRes, cmap=plt.cm.jet, interpolation="nearest")#, alpha=0.25)
 
-		ax21.set_title('Slice ' + str(int(3*n/9)), fontsize=10, color='#104E8B')
-		ax22.set_title('Slice ' + str(int(4*n/9)), fontsize=10, color='#104E8B')
-		ax23.set_title('Slice ' + str(int(5*n/9)), fontsize=10, color='#104E8B')
-		ax24.set_title('Slice ' + str(int(6*n/9)), fontsize=10, color='#104E8B')
 
-		cax = f2.add_axes([0.9, 0.1, 0.03, 0.8])
-		f2.colorbar(im, cax=cax)
 
-		# Histogram
-		f3   = plt.figure()
-		f3.suptitle('Histogram of ResMap Results', fontsize=14, color='#104E8B', fontweight='bold')
-		axf3 = f3.add_subplot(111)
 
-		axf3.bar(range(len(resHisto)), resHisto.values(), align='center')
-		axf3.set_xlabel('Resolution (Angstroms)')
-		axf3.set_xticks(range(len(resHisto)))
-		axf3.set_xticklabels(resHisto.keys())
-		axf3.set_ylabel('Number of Voxels')
 
-		plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def computeMask(**kwargs):
+
+	data        = kwargs.get('data', None)
+	dataMask    = kwargs.get('dataMask', None)
+	LPFfactor   = kwargs.get('LPFfactor', None)
+	splitVolume = kwargs.get('splitVolume', False)
+
+	print '\n= Computing Mask Separating Particle from Background'
+	tStart = time()
+
+	# Update n in case downsampling was done above
+	n = data.shape[0]
+
+	# We assume the particle is at the center of the volume
+	# Create spherical mask
+	R = createRmatrix(n)
+	Rinside = R < n/2 - 1
+
+	# Check to see if mask volume was provided
+	if isinstance(dataMask,MRC_Data) == False:
+		# Compute mask separating the particle from background
+		dataBlurred  = filters.gaussian_filter(data, float(n)*0.02)	# kernel size 2% of n
+		dataMask     = dataBlurred > np.max(dataBlurred)*5e-2		# threshold at 5% of max value
+		del dataBlurred
+	else:
+		if LPFfactor == 0.0:
+			dataMask = np.array(dataMask.matrix, dtype='bool')
+		else:	# Interpolate the given mask
+			dataMask = ndimage.interpolation.zoom(dataMask.matrix, LPFfactor, mode='reflect')
+			dataMask = filters.gaussian_filter(dataMask, float(n)*0.02)	# kernel size 2% of n
+			dataMask = dataMask > np.max(dataMask)*5e-2					# threshold at 5% of max value
+
+	if splitVolume == False:
+		mask = np.bitwise_and(dataMask,  R < n/2 - 9)	# backoff 9 voxels from edge (make adaptive later)
+	else:
+		tmp_box = np.zeros((n,n,n), dtype='bool')	# make cube that goes to 9 voxels to the edge
+		tmp_box[9:-9,9:-9,9:-9] = True 						# | this is a hack for Liz Kellog's case
+		mask = np.bitwise_and(dataMask, tmp_box)
+		del tmp_box
+
+	oldSumOfMask = np.sum(mask)
+
+	m, s = divmod(time() - tStart, 60)
+	print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
+
+	return {'mask':mask, 'dataMask':dataMask, 'oldSumOfMask':oldSumOfMask,
+					'Rinside': Rinside}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def testLPF(**kwargs):
+
+	# Get inputs
+	data        = kwargs.get('data',     None)
+	dataDiff    = kwargs.get('dataDiff', None)
+	splitVolume = kwargs.get('splitVolume', False)
+	vxSize      = kwargs.get('vxSize', 0.0)
+	minRes      = kwargs.get('minRes', 0.0)
+	maxRes      = kwargs.get('maxRes', 0.0)
+	currentRes  = kwargs.get('currentRes', 0.0)
+	subVolLPF   = kwargs.get('subVolLPF', 0.0)
+
+	n = data.shape[0]
+
+	print '\n\n= Testing Whether the Input Volume has been Low-pass Filtered\n'
+	tStart = time()
+
+	# If the volume is larger than subVolLPF^3, then do LPF test on smaller volume to save computation
+	if n > subVolLPF:
+
+		print ( "=======================================================================\n"
+				"|                                                                     |\n"
+				"|          The input volume is quite large ( >160 voxels).            |\n"
+				"|                                                                     |\n"
+				"|         ResMap will run its low-pass filtering test on a            |\n"
+				"|       cube of size 160 taken from the center of the volume.         |\n"
+				"|                                                                     |\n"
+				"|        This is usually not a problem, but please notify the         |\n"
+				"|                  authors if something goes awry.                    |\n"
+				"|                                                                     |\n"
+				"=======================================================================\n")
+
+		mid  = int(n/2)
+		midR = subVolLPF/2
+
+		# Extract a cube from the middle of the density
+		middleCube = data[mid-midR:mid+midR, mid-midR:mid+midR, mid-midR:mid+midR]
+
+		# Create a 3D hamming window
+		hammingWindow1D = signal.hamming(subVolLPF)
+		hammingWindow2D = array_outer_product(hammingWindow1D,hammingWindow1D)
+		hammingWindow3D = array_outer_product(hammingWindow2D,hammingWindow2D)
+		del hammingWindow1D, hammingWindow2D
+
+		# Apply the hamming window to the middle cube
+		middleCube = np.multiply(middleCube,hammingWindow3D)
+
+		# Calculate the Fourier spectrum and run the test
+		(dataF, dataPowerSpectrum) = calculatePowerSpectrum(middleCube)
+		LPFtest                    = isPowerSpectrumLPF(dataPowerSpectrum)
+		del middleCube, hammingWindow3D
+	else:
+		(dataF, dataPowerSpectrum) = calculatePowerSpectrum(data)
+		LPFtest                    = isPowerSpectrumLPF(dataPowerSpectrum)
+
+	if LPFtest['outcome']:
+		print ( "=======================================================================\n"
+				"|                                                                     |\n"
+				"|            The volume appears to be low-pass filtered.              |\n"
+				"|                                                                     |\n"
+				"|         This is not ideal, but ResMap will attempt to run.          |\n"
+				"|                                                                     |\n"
+				"|        The input volume will be down-sampled within ResMap.         |\n"
+				"|                                                                     |\n"
+				"=======================================================================\n")
+
+		# Calculate the ratio by which the volume should be down-sampled
+		# such that the LPF cutoff becomes the new Nyquist
+		LPFfactor = round((LPFtest['factor'])/0.01)*0.01	# round to the nearest 0.01
+
+		# Down-sample the volume using cubic splines
+		data   = ndimage.interpolation.zoom(data, LPFfactor, mode='reflect')
+		if splitVolume == True:
+			dataDiff = ndimage.interpolation.zoom(dataDiff, LPFfactor, mode='reflect')
+		vxSize = float(vxSize)/LPFfactor
+	else:
+		print ( "=======================================================================\n"
+				"|                                                                     |\n"
+				"|        The volume does not appear to be low-pass filtered.          |\n"
+				"|                                                                     |\n"
+				"|                              Great!                                 |\n"
+				"|                                                                     |\n"
+				"=======================================================================\n")
+		LPFfactor = 0.0
+
+	# Calculate min res
+	if minRes <= (2.2*vxSize):
+		minRes = round((2.2*vxSize)/0.1)*0.1 # round to the nearest 0.1
+	currentRes = minRes
+
+	# Calculate max res
+	if maxRes == 0.0:
+		maxRes = round((4.0*vxSize)/0.5)*0.5 # round to the nearest 0.5
+
+	m, s = divmod(time() - tStart, 60)
+	print "  :: Time elapsed: %d minutes and %.2f seconds" % (m, s)
+
+	if splitVolume == False:
+		return {'LPFfactor':LPFfactor, 'vxSize':vxSize,
+						'minRes':minRes, 'maxRes':maxRes, 'currentRes':currentRes,
+						'data':data,
+						'dataF':dataF, 'dataPowerSpectrum':dataPowerSpectrum}
+	else:
+		return {'LPFfactor':LPFfactor, 'vxSize':vxSize,
+						'minRes':minRes, 'maxRes':maxRes, 'currentRes':currentRes,
+						'data':data, 'dataDiff':dataDiff,
+						'dataF':dataF, 'dataPowerSpectrum':dataPowerSpectrum}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def visualize2Doutput(**kwargs):
+
+	# Get inputs
+	dataOrig   = kwargs.get('dataOrig',  None)
+	minRes     = kwargs.get('minRes', 0.0)
+	maxRes     = kwargs.get('maxRes', 0.0)
+	resTOTALma = kwargs.get('resTOTALma',  None)
+	resHisto   = kwargs.get('resHisto', None)
+
+	# Grab the volume size (assumed to be a cube)
+	orig_n = dataOrig.shape[0]
+	n     = resTOTALma.shape[0]
+
+	# Plots
+	f, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2)
+	f.suptitle('Slices Through Input Volume', fontsize=14, color='#104E8B', fontweight='bold')
+	vminData, vmaxData = np.min(dataOrig), np.max(dataOrig)
+	ax1.imshow(dataOrig[int(3*orig_n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
+	ax2.imshow(dataOrig[int(4*orig_n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
+	ax3.imshow(dataOrig[int(5*orig_n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
+	ax4.imshow(dataOrig[int(6*orig_n/9),:,:], vmin=vminData, vmax=vmaxData, cmap=plt.cm.gray, interpolation="nearest")
+
+	ax1.set_title('Slice ' + str(int(3*n/9)), fontsize=10, color='#104E8B')
+	ax2.set_title('Slice ' + str(int(4*n/9)), fontsize=10, color='#104E8B')
+	ax3.set_title('Slice ' + str(int(5*n/9)), fontsize=10, color='#104E8B')
+	ax4.set_title('Slice ' + str(int(6*n/9)), fontsize=10, color='#104E8B')
+
+	f2, ((ax21, ax22), (ax23, ax24)) = plt.subplots(2, 2)
+	f2.suptitle('Slices Through ResMap Results', fontsize=14, color='#104E8B', fontweight='bold')
+	# ax21.imshow(dataOrig[int(3*orig_n/9),:,:], cmap=plt.cm.gray, interpolation="nearest")
+	# ax22.imshow(dataOrig[int(4*orig_n/9),:,:], cmap=plt.cm.gray, interpolation="nearest")
+	# ax23.imshow(dataOrig[int(5*orig_n/9),:,:], cmap=plt.cm.gray, interpolation="nearest")
+	# ax24.imshow(dataOrig[int(6*orig_n/9),:,:], cmap=plt.cm.gray, interpolation="nearest")
+	vminRes, vmaxRes = minRes, maxRes
+	im = ax21.imshow(resTOTALma[int(3*orig_n/9),:,:], vmin=vminRes, vmax=vmaxRes, cmap=plt.cm.jet, interpolation="nearest")#, alpha=0.25)
+	ax22.imshow(     resTOTALma[int(4*orig_n/9),:,:], vmin=vminRes, vmax=vmaxRes, cmap=plt.cm.jet, interpolation="nearest")#, alpha=0.25)
+	ax23.imshow(     resTOTALma[int(5*orig_n/9),:,:], vmin=vminRes, vmax=vmaxRes, cmap=plt.cm.jet, interpolation="nearest")#, alpha=0.25)
+	ax24.imshow(     resTOTALma[int(6*orig_n/9),:,:], vmin=vminRes, vmax=vmaxRes, cmap=plt.cm.jet, interpolation="nearest")#, alpha=0.25)
+
+	ax21.set_title('Slice ' + str(int(3*n/9)), fontsize=10, color='#104E8B')
+	ax22.set_title('Slice ' + str(int(4*n/9)), fontsize=10, color='#104E8B')
+	ax23.set_title('Slice ' + str(int(5*n/9)), fontsize=10, color='#104E8B')
+	ax24.set_title('Slice ' + str(int(6*n/9)), fontsize=10, color='#104E8B')
+
+	cax = f2.add_axes([0.9, 0.1, 0.03, 0.8])
+	f2.colorbar(im, cax=cax)
+
+	# Histogram
+	f3   = plt.figure()
+	f3.suptitle('Histogram of ResMap Results', fontsize=14, color='#104E8B', fontweight='bold')
+	axf3 = f3.add_subplot(111)
+
+	axf3.bar(range(len(resHisto)), resHisto.values(), align='center')
+	axf3.set_xlabel('Resolution (Angstroms)')
+	axf3.set_xticks(range(len(resHisto)))
+	axf3.set_xticklabels(resHisto.keys())
+	axf3.set_ylabel('Number of Voxels')
+
+	plt.show()
 
 
 
